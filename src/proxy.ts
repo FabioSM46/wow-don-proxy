@@ -1,3 +1,4 @@
+import { dailyLimit, utcDay } from "./budget";
 import { InvalidRequest, match, POST_BODIES, idsBody, WOW_GAME_ID, type Route } from "./routes";
 
 export const UPSTREAM = "https://api.curseforge.com";
@@ -10,6 +11,13 @@ const UPSTREAM_TIMEOUT_MS = 20_000;
 export type Upstream = (input: string, init: RequestInit) => Promise<Response>;
 
 type Log = Record<string, string | number>;
+
+/**
+ * The UTC day on which this isolate saw the daily budget spent. Not request state: a shortcut
+ * that only ever refuses, so that once the cap is reached a flood stops calling the counter
+ * (whose own daily request quota would otherwise go with it). Lost on eviction, then relearned.
+ */
+let spentOn: string | undefined;
 
 class TooLarge extends Error {}
 
@@ -189,7 +197,26 @@ async function route(request: Request, env: Env, upstream: Upstream, log: Log): 
     console.error(JSON.stringify({ message: "CURSEFORGE_API_KEY is not set" }));
     return error(503, "unavailable");
   }
+
+  // Last, so that only valid requests about to reach CurseForge spend the global budget, and
+  // a single client is held back by RATE_LIMITER before it can drain it.
+  const limit = dailyLimit(env.DAILY_LIMIT);
+  if (limit === undefined) {
+    console.error(JSON.stringify({ message: "DAILY_LIMIT is not a positive integer" }));
+    return error(503, "unavailable");
+  }
+  const today = utcDay(new Date());
+  if (spentOn === today || !(await env.DAILY_BUDGET.getByName("global").take(limit))) {
+    spentOn = today;
+    log.limited = "daily";
+    return error(503, "daily_limit");
+  }
   return forward(upstream, key.trim(), matched, log);
+}
+
+/** Tests only: forgets the day the budget was seen spent. */
+export function forgetSpentBudget(): void {
+  spentOn = undefined;
 }
 
 /**

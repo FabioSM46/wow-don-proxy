@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { handle, UPSTREAM, type Upstream } from "../src/proxy";
+import { dailyLimit, spend, utcDay, type Spent } from "../src/budget";
+import { forgetSpentBudget, handle, UPSTREAM, type Upstream } from "../src/proxy";
 
 const KEY = "test-key-not-real";
 const UA = "wow-don/0.1.0";
@@ -9,10 +10,31 @@ interface Call {
   init: RequestInit;
 }
 
+/** A fake `DailyBudget` with the real counting rule, keeping its record in memory. */
+function budget(start?: Spent): { binding: unknown; names: string[]; spent: () => Spent | undefined } {
+  let stored = start;
+  const names: string[] = [];
+  const binding = {
+    getByName(name: string) {
+      names.push(name);
+      return {
+        take: async (limit: number) => {
+          const { state, allowed } = spend(stored, new Date(), limit);
+          if (allowed) stored = state;
+          return allowed;
+        },
+      };
+    },
+  };
+  return { binding, names, spent: () => stored };
+}
+
 function env(overrides: Partial<Record<keyof Env, unknown>> = {}, allowed = true): Env {
   return {
     CURSEFORGE_API_KEY: KEY,
     PROXY_ENABLED: "true",
+    DAILY_LIMIT: "30000",
+    DAILY_BUDGET: budget().binding,
     RATE_LIMITER: { limit: async () => ({ success: allowed }) },
     ...overrides,
   } as Env;
@@ -50,6 +72,7 @@ function post(path: string, body: string, headers: Record<string, string> = {}):
 let logs: string[];
 
 beforeEach(() => {
+  forgetSpentBudget();
   logs = [];
   const capture = (line: unknown) => logs.push(String(line));
   vi.spyOn(console, "log").mockImplementation(capture);
@@ -348,5 +371,87 @@ describe("responses", () => {
     expect(logs[0]).not.toContain("secret");
     expect(logs[0]).not.toContain("192.0.2.1");
     expect(logs[0]).not.toContain(UA);
+  });
+});
+
+describe("the daily budget", () => {
+  const today = utcDay(new Date());
+
+  it("lets requests through and counts each one on the single global counter", async () => {
+    const counter = budget();
+    const up = upstream(ok({ data: [] }), ok({ data: [] }));
+    const e = env({ DAILY_BUDGET: counter.binding });
+    expect((await handle(get("/v1/games/1/version-types"), e, up.fn)).status).toBe(200);
+    expect((await handle(get("/v1/games/1/version-types"), e, up.fn)).status).toBe(200);
+    expect(counter.spent()).toEqual({ day: today, count: 2 });
+    expect(counter.names).toEqual(["global", "global"]);
+  });
+
+  it("answers 503 without reaching CurseForge once today's limit is spent", async () => {
+    const counter = budget({ day: today, count: 3 });
+    const up = upstream();
+    const response = await handle(get("/v1/mods/1"), env({ DAILY_LIMIT: "3", DAILY_BUDGET: counter.binding }), up.fn);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "daily_limit" });
+    expect(up.calls).toHaveLength(0);
+    expect(counter.spent()).toEqual({ day: today, count: 3 });
+    expect(JSON.parse(logs[0]!)).toMatchObject({ status: 503, limited: "daily" });
+  });
+
+  it("stops asking the counter once it has refused today", async () => {
+    const counter = budget({ day: today, count: 1 });
+    const e = env({ DAILY_LIMIT: "1", DAILY_BUDGET: counter.binding });
+    expect((await handle(get("/v1/mods/1"), e, upstream().fn)).status).toBe(503);
+    expect((await handle(get("/v1/mods/1"), e, upstream().fn)).status).toBe(503);
+    expect(counter.names).toHaveLength(1);
+  });
+
+  it("is not spent by requests refused before CurseForge", async () => {
+    const counter = budget();
+    const e = (overrides: Partial<Record<keyof Env, unknown>> = {}, allowed = true) =>
+      env({ DAILY_BUDGET: counter.binding, ...overrides }, allowed);
+    const up = upstream();
+    await handle(get("/v1/mods/1", { origin: "https://example.com" }), e(), up.fn);
+    await handle(get("/v1/mods/1", { "user-agent": "curl/8.0" }), e(), up.fn);
+    await handle(get("/v1/nope"), e(), up.fn);
+    await handle(get("/v1/mods/1"), e({}, false), up.fn);
+    await handle(get("/v1/mods/1"), e({ PROXY_ENABLED: "false" }), up.fn);
+    await handle(get("/v1/mods/1"), e({ CURSEFORGE_API_KEY: "" }), up.fn);
+    expect(counter.names).toHaveLength(0);
+    expect(counter.spent()).toBeUndefined();
+  });
+
+  it.each([undefined, "", "0", "-5", "1.5", "abc", "1e3", "01"])(
+    "fails closed on DAILY_LIMIT %j",
+    async (value) => {
+      const counter = budget();
+      const up = upstream();
+      const response = await handle(get("/v1/mods/1"), env({ DAILY_LIMIT: value, DAILY_BUDGET: counter.binding }), up.fn);
+      expect(response.status).toBe(503);
+      expect(up.calls).toHaveLength(0);
+      expect(counter.names).toHaveLength(0);
+    },
+  );
+});
+
+describe("spend", () => {
+  const now = new Date("2026-10-29T23:59:59Z");
+
+  it("counts up to the limit and then refuses", () => {
+    expect(spend(undefined, now, 2)).toEqual({ state: { day: "2026-10-29", count: 1 }, allowed: true });
+    expect(spend({ day: "2026-10-29", count: 1 }, now, 2)).toEqual({ state: { day: "2026-10-29", count: 2 }, allowed: true });
+    expect(spend({ day: "2026-10-29", count: 2 }, now, 2)).toEqual({ state: { day: "2026-10-29", count: 2 }, allowed: false });
+  });
+
+  it("starts again at 00:00 UTC", () => {
+    const next = new Date("2026-10-30T00:00:00Z");
+    expect(spend({ day: "2026-10-29", count: 2 }, next, 2)).toEqual({ state: { day: "2026-10-30", count: 1 }, allowed: true });
+  });
+
+  it("reads DAILY_LIMIT only as a positive integer", () => {
+    expect(dailyLimit("30000")).toBe(30000);
+    expect(dailyLimit("1")).toBe(1);
+    expect(dailyLimit(30000)).toBeUndefined();
+    expect(dailyLimit("0")).toBeUndefined();
   });
 });

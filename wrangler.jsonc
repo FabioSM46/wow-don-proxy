@@ -10,7 +10,11 @@
   "vars": {
     // Kill switch: set to "false" (dashboard or redeploy) and every request gets 503
     // without reaching CurseForge.
-    "PROXY_ENABLED": "true"
+    "PROXY_ENABLED": "true",
+    // Global cap on the requests sent to CurseForge per UTC day, across every client. Past it
+    // every request gets 503 until 00:00 UTC, so that whoever calls the Worker can never push
+    // the key's traffic beyond this volume.
+    "DAILY_LIMIT": "30000"
   },
   // Set only with `wrangler secret put CURSEFORGE_API_KEY`, never written in this file.
   "secrets": { "required": ["CURSEFORGE_API_KEY"] },
@@ -19,9 +23,15 @@
       // Per client IP and per Cloudflare location; approximate by design.
       "name": "RATE_LIMITER",
       "namespace_id": "4601",
-      "simple": { "limit": 600, "period": 60 }
+      "simple": { "limit": 120, "period": 60 }
     }
   ],
+  // The counter behind DAILY_LIMIT: one SQLite-backed Durable Object (the only kind on the
+  // free plan).
+  "durable_objects": {
+    "bindings": [{ "name": "DAILY_BUDGET", "class_name": "DailyBudget" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DailyBudget"] }],
   "observability": {
     "enabled": true,
     "logs": {

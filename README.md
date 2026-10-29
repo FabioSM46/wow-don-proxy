@@ -5,6 +5,9 @@ CurseForge API without shipping the API key in the app. The key lives only in th
 secrets; the app calls the Worker, which answers a closed list of read-only, World of
 Warcraft-only routes. See [SECURITY.md](SECURITY.md) for the model and its limits.
 
+It is meant for the official WoW-don builds only: forks and other apps must deploy their own
+copy with their own CurseForge key.
+
 ## Development
 
 Requires Node 22 and pnpm 10.

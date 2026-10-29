@@ -28,8 +28,27 @@ the app can be extracted, and desktop systems have no app attestation. The Worke
 `Sec-Fetch-Site`, no CORS), but these filter stray traffic: they are not authentication.
 
 The design therefore assumes that anyone can call the Worker and limits what that is worth:
-read-only access to CurseForge's public WoW catalogue, through ten fixed routes, at a
-limited rate (`RATE_LIMITER`, per client address and Cloudflare location), never the key.
+read-only access to CurseForge's public WoW catalogue, through ten fixed routes, never the
+key, at a bounded volume:
+
+- **Per client**: `RATE_LIMITER` allows 120 requests a minute per client address and
+  Cloudflare location. WoW-don batches its lookups (up to 100 ids per call) and downloads
+  zips from the CDN, so a real user stays far below it.
+- **Globally**: `DAILY_LIMIT` (30,000) caps the requests sent to CurseForge per UTC day,
+  counted by one Durable Object (`DailyBudget`) across every client and location. Past it
+  every request gets `503 daily_limit` until 00:00 UTC. Only valid requests about to reach
+  CurseForge spend it. Whatever anyone does, the key's traffic never exceeds this volume.
+
+What this does not bound is the Worker's own quota (100,000 requests a day on the free plan):
+a refused request still runs the Worker. A flood from many addresses can exhaust it, and the
+Worker then stops answering until 00:00 UTC. That is an outage, not a cost and not a risk to
+the key. Stopping such traffic before the Worker would need a WAF rate-limiting rule, which
+applies only on a custom domain, not on `workers.dev`.
+
+## Use by other builds
+
+The Worker serves the official WoW-don builds. A fork or a different app must use its own
+CurseForge key and its own deployment of this Worker, not this one.
 
 ## Routes
 
@@ -51,6 +70,8 @@ Downloads do not go through the Worker: the zips are on CurseForge's CDN, which 
 ## Operating
 
 - **Kill switch**: set `PROXY_ENABLED` to anything but `true` and every request gets 503.
+- **Daily cap**: `DAILY_LIMIT` in `wrangler.jsonc`, a positive integer; anything else makes
+  every request 503. Requests refused by it log `"limited": "daily"`.
 - **Key rotation**: `wrangler secret put CURSEFORGE_API_KEY` with the new key, then revoke
   the old one in the CurseForge console. WoW-don needs no new release.
 - **A rejected key** shows as `upstream rejected the key` at error level in Workers Logs;

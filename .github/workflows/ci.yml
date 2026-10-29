@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Full history: the commit-privacy scan walks every commit the pull request adds.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reject publication privacy leaks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check-publication-privacy.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: Reject commit privacy leaks
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/check-commit-privacy.sh "$BASE_SHA" "$HEAD_SHA"
+      - name: Reject publication privacy leaks in the tree
+        if: github.event_name != 'pull_request'
+        run: bash scripts/check-publication-privacy.sh
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ">=22.18.0 <23"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Also fails when worker-configuration.d.ts no longer matches wrangler.jsonc.
+      - run: pnpm typecheck
+      - run: pnpm test
+      # Bundles the Worker exactly as a deploy would, without credentials or upload.
+      - run: pnpm exec wrangler deploy --dry-run --outdir dist

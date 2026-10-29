@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "wow-don-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-29",
+  // Served only on the free workers.dev address; no preview URLs that would expose
+  // other versions of the Worker.
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    // Kill switch: set to "false" (dashboard or redeploy) and every request gets 503
+    // without reaching CurseForge.
+    "PROXY_ENABLED": "true"
+  },
+  // Set only with `wrangler secret put CURSEFORGE_API_KEY`, never written in this file.
+  "secrets": { "required": ["CURSEFORGE_API_KEY"] },
+  "ratelimits": [
+    {
+      // Per client IP and per Cloudflare location; approximate by design.
+      "name": "RATE_LIMITER",
+      "namespace_id": "4601",
+      "simple": { "limit": 600, "period": 60 }
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      // The Worker writes its own log line without query strings or client data.
+      "invocation_logs": false
+    },
+    // Traces never record custom headers such as x-api-key.
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  }
+}

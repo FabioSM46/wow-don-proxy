@@ -24,10 +24,12 @@ Done by the operator, from this folder (the Worker's name comes from `wrangler.j
 ```sh
 pnpm exec wrangler login
 pnpm exec wrangler deploy
-pnpm exec wrangler secret put CURSEFORGE_API_KEY   # prompts for the value
+pnpm exec wrangler secret put CURSEFORGE_API_KEY   # prompts for the value, no quotes
 ```
 
-The address is `https://wow-don-proxy.<account-subdomain>.workers.dev`.
+The Worker runs at `https://wow-don-proxy.fabiosm46.workers.dev`; WoW-don's backend calls it
+there (WoW-don decision D44). Deploy first, then set the secret: `wrangler secret put` on a
+Worker that does not exist yet creates an empty placeholder.
 
 ## License
 
